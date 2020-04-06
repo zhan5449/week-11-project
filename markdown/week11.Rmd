@@ -1,0 +1,103 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+# R Studio API Code
+
+```{r,include=F}
+knitr::opts_chunk$set(echo = TRUE)
+# library(rstudioapi)
+# setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+```
+
+# Libraries
+```{r,message=F,warning=F}
+library(tidyverse)
+library(haven)
+library(caret)
+library(RANN)
+```
+
+# Data Import and Cleaning
+```{r}
+gss <- read_sav("../Data/GSS2006.sav") %>%
+  select(BIG5A1,BIG5B1,BIG5C1,BIG5D1,BIG5E1,BIG5A2,BIG5B2,BIG5C2,BIG5D2,BIG5E2,HEALTH) %>%
+  mutate_all(as.numeric) 
+gss_tbl <- gss[rowSums(is.na(gss[,1:10]))!=ncol(gss[,1:10]) & !is.na(gss[,11]),]
+pander::pander(head(gss_tbl))
+```
+I read in the 10 personality predictors and the health criterion, converted all to numeric variables, and removed rows where there was no data at all, rows where all 10 predictor variables were missing, and rows where the criterion was missing.
+
+# Analysis
+```{r,message=F,warning=F}
+pp <- preProcess(gss_tbl[,-11], 
+                 method=c("center","scale","zv","knnImpute"))
+gss_preprocessed <- predict(pp,newdata=gss_tbl)
+
+set.seed(2020)
+rows <- sample(nrow(gss_preprocessed))
+shuffled_gss <- gss_preprocessed[rows,]
+gss_holdout <- shuffled_gss[1:250,]
+gss_train <- shuffled_gss[251:nrow(shuffled_gss),]
+
+ols_model <- train(
+  HEALTH~.^2,
+  gss_train,
+  method="glm",
+  trControl=trainControl(method="cv",number=10,verboseIter=F),
+  na.action=na.pass
+)
+ols_val_train <- cor(predict(ols_model,gss_train,na.action=na.pass),gss_train$HEALTH) # correlation between predicted values and true values in training data
+ols_val_holdout <- cor(predict(ols_model,gss_holdout,na.action=na.pass),gss_holdout$HEALTH) # correlation between predicted values and true values in holdout data
+
+glmnet_model <- train(
+  HEALTH~.^2,
+  gss_train,
+  method="glmnet",
+  trControl=trainControl(method="cv",number=10,verboseIter=F),
+  na.action=na.pass
+)
+glmnet_val_train <- cor(predict(glmnet_model,gss_train,na.action=na.pass),gss_train$HEALTH) # correlation between predicted values and true values in training data
+glmnet_val_holdout <- cor(predict(glmnet_model,gss_holdout,na.action=na.pass),gss_holdout$HEALTH) # correlation between predicted values and true values in holdout data
+
+svm_model <- train(
+  HEALTH~.^2,
+  gss_train,
+  method="svmLinear",
+  trControl=trainControl(method="cv",number=10,verboseIter=F),
+  na.action=na.pass
+)
+svm_val_train <- cor(predict(svm_model,gss_train,na.action=na.pass),gss_train$HEALTH) # correlation between predicted values and true values in training data
+svm_val_holdout <- cor(predict(svm_model,gss_holdout,na.action=na.pass),gss_holdout$HEALTH) # correlation between predicted values and true values in holdout data
+
+xgb_model <- train(
+  HEALTH~.^2,
+  gss_train,
+  method="xgbTree",
+  trControl=trainControl(method="cv",number=10,verboseIter=F),
+  na.action=na.pass
+)
+xgb_val_train <- cor(predict(xgb_model,gss_train,na.action=na.pass),gss_train$HEALTH) # correlation between predicted values and true values in training data
+xgb_val_holdout <- cor(predict(xgb_model,gss_holdout,na.action=na.pass),gss_holdout$HEALTH) # correlation between predicted values and true values in holdout data
+
+validities <- matrix(c(ols_val_train,ols_val_holdout,
+                       glmnet_val_train,glmnet_val_holdout,
+                       svm_val_train,svm_val_holdout,
+                       xgb_val_train,xgb_val_holdout),
+                     nrow=4,ncol=2,byrow=T,dimnames=list(c("ols","glmnet","svm","xgb"),
+                                                         c("train","holdout")))
+pander::pander(validities)
+summary(resamples(list("ols"=ols_model,"elastic"=glmnet_model,"svm"=svm_model,"xgb"=xgb_model)))
+```
+
+# Visualization
+```{r}
+dotplot(resamples(list("ols"=ols_model,"elastic"=glmnet_model,"svm"=svm_model,"xgb"=xgb_model)))
+```
+
+Because the final hypertuning parameters used for the elastic net model was \(\alpha\) = 1, \(\lambda\) = .022, the optimal model was a LASSO regression.
+
+When evaluating different models with metrics of RMSE and R^2^, elastic net regression (LASSO really) had the lowest RMSE and the highest R^2^, and therefore is the best-performing model out of the four. However, when examining validities for both the training and the holdout sample, the results are somewhat discrepant. Extreme gradient boosted regression has the highest correlation with the criterion in the training sample (.36), as well the highest correlaion in the holdout sample (.25). Elastic net regression performed well in terms of RMSE and R^2^, but had the lowest correlation in the training sample. However, its validity in the holdout sample is the second highest, showing good generalizability. Support vector regression and OLS models had poorer validities in the holdout sample. Therefore, I prefer the elastic net regression model overall. 
